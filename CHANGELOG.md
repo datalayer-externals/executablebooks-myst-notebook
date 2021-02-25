@@ -1,5 +1,16 @@
 # Change Log
 
+# 0.12.0 - 2021-02-23
+
+This release adds an experimental MyST-NB feature to enable loading of code from a file
+for `code-cell` directives using a `:load: <file>` option.
+
+Usage information is available in the [docs](https://myst-nb.readthedocs.io/en/latest/use/markdown.html#syntax-for-code-cells)
+
+## 0.11.1 - 2021-01-20
+
+Minor update to handle MyST-Parser `v0.13.3` and `v4.5` notebooks.
+
 ## 0.11.0 - 2021-01-12
 
 This release updates MyST-Parser to `v0.13`,
