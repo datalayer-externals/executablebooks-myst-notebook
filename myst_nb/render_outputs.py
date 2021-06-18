@@ -1,26 +1,23 @@
 """A Sphinx post-transform, to convert notebook outpus to AST nodes."""
-from abc import ABC, abstractmethod
 import os
+from abc import ABC, abstractmethod
 from typing import List, Optional
 from unittest import mock
 
-from importlib_metadata import entry_points
+import nbconvert
 from docutils import nodes
 from docutils.parsers.rst import directives
+from importlib_metadata import entry_points
+from jupyter_sphinx.ast import JupyterWidgetViewNode, strip_latex_delimiters
+from jupyter_sphinx.utils import sphinx_abs_dir
+from myst_parser.docutils_renderer import make_document
+from myst_parser.main import MdParserConfig, default_parser
+from nbformat import NotebookNode
 from sphinx.environment import BuildEnvironment
 from sphinx.environment.collectors.asset import ImageCollector
 from sphinx.errors import SphinxError
 from sphinx.transforms.post_transforms import SphinxPostTransform
 from sphinx.util import logging
-
-import nbconvert
-from nbformat import NotebookNode
-
-from jupyter_sphinx.ast import strip_latex_delimiters, JupyterWidgetViewNode
-from jupyter_sphinx.utils import sphinx_abs_dir
-
-from myst_parser.main import default_parser, MdParserConfig
-from myst_parser.docutils_renderer import make_document
 
 from .nodes import CellOutputBundleNode
 
@@ -70,26 +67,28 @@ class MystNbEntryPointError(SphinxError):
     category = "MyST NB Renderer Load"
 
 
-def load_renderer(name) -> "CellOutputRendererBase":
+def load_renderer(name: str) -> "CellOutputRendererBase":
     """Load a renderer,
     given a name within the ``myst_nb.mime_render`` entry point group
     """
-    ep_list = set(ep for ep in entry_points()["myst_nb.mime_render"] if ep.name == name)
-    if len(ep_list) == 1:
-        klass = ep_list.pop().load()
+    all_eps = entry_points()
+    if hasattr(all_eps, "select"):
+        # importlib_metadata >= 3.6 or importlib.metadata in python >=3.10
+        eps = all_eps.select(group="myst_nb.mime_render", name=name)
+        found = name in eps.names
+    else:
+        eps = {ep.name: ep for ep in all_eps.get("myst_nb.mime_render", [])}
+        found = name in eps
+    if found:
+        klass = eps[name].load()
         if not issubclass(klass, CellOutputRendererBase):
             raise MystNbEntryPointError(
                 f"Entry Point for myst_nb.mime_render:{name} "
                 f"is not a subclass of `CellOutputRendererBase`: {klass}"
             )
         return klass
-    elif not ep_list:
-        raise MystNbEntryPointError(
-            f"No Entry Point found for myst_nb.mime_render:{name}"
-        )
-    raise MystNbEntryPointError(
-        f"Multiple Entry Points found for myst_nb.mime_render:{name}: {ep_list}"
-    )
+
+    raise MystNbEntryPointError(f"No Entry Point found for myst_nb.mime_render:{name}")
 
 
 class CellOutputsToNodes(SphinxPostTransform):

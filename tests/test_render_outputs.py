@@ -1,19 +1,19 @@
 from unittest.mock import patch
 
-from importlib_metadata import EntryPoint
 import pytest
+from importlib_metadata import EntryPoint
 
-from myst_nb.render_outputs import load_renderer, MystNbEntryPointError
+from myst_nb.render_outputs import MystNbEntryPointError, load_renderer
 
 
 def test_load_renderer_not_found():
-    with pytest.raises(MystNbEntryPointError):
+    with pytest.raises(MystNbEntryPointError, match="No Entry Point found"):
         load_renderer("other")
 
 
 @patch.object(EntryPoint, "load", lambda self: EntryPoint)
 def test_load_renderer_not_subclass():
-    with pytest.raises(MystNbEntryPointError):
+    with pytest.raises(MystNbEntryPointError, match="Entry Point .* not a subclass"):
         load_renderer("default")
 
 
