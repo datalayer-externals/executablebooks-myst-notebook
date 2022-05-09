@@ -1,8 +1,8 @@
-"""A parser for docutils."""
+"""The docutils parser implementation for myst-nb."""
 from __future__ import annotations
 
-from contextlib import suppress
-from functools import partial
+from dataclasses import dataclass, field
+from functools import lru_cache, partial
 from importlib import resources as import_resources
 import os
 from typing import Any
@@ -24,10 +24,9 @@ from pygments.formatters import get_formatter_by_name
 
 from myst_nb import static
 from myst_nb.core.config import NbParserConfig
-from myst_nb.core.execute import execute_notebook
+from myst_nb.core.execute import create_client
 from myst_nb.core.loggers import DEFAULT_LOG_TYPE, DocutilsDocLogger
-from myst_nb.core.parse import nb_node_to_dict, notebook_to_tokens
-from myst_nb.core.preprocess import preprocess_notebook
+from myst_nb.core.nb_to_tokens import nb_node_to_dict, notebook_to_tokens
 from myst_nb.core.read import (
     NbReader,
     UnexpectedCellDirective,
@@ -35,17 +34,35 @@ from myst_nb.core.read import (
     standard_nb_read,
 )
 from myst_nb.core.render import (
+    MditRenderMixin,
     MimeData,
     NbElementRenderer,
     create_figure_context,
     get_mime_priority,
     load_renderer,
 )
-from myst_nb.glue import get_glue_directives, get_glue_roles
+from myst_nb.ext.eval import load_eval_docutils
+from myst_nb.ext.glue import load_glue_docutils
 
 DOCUTILS_EXCLUDED_ARGS = list(
     {f.name for f in NbParserConfig.get_fields() if f.metadata.get("docutils_exclude")}
 )
+
+
+@dataclass
+class DocutilsApp:
+    roles: dict[str, Any] = field(default_factory=dict)
+    directives: dict[str, Any] = field(default_factory=dict)
+
+
+@lru_cache(maxsize=1)
+def get_nb_roles_directives() -> DocutilsApp:
+    app = DocutilsApp()
+    app.directives["code-cell"] = UnexpectedCellDirective
+    app.directives["raw-cell"] = UnexpectedCellDirective
+    load_eval_docutils(app)
+    load_glue_docutils(app)
+    return app
 
 
 class Parser(MystParser):
@@ -66,20 +83,17 @@ class Parser(MystParser):
 
     def parse(self, inputstring: str, document: nodes.document) -> None:
         # register/unregister special directives and roles
-        new_directives = get_glue_directives()
-        new_directives["code-cell"] = UnexpectedCellDirective
-        new_directives["raw-cell"] = UnexpectedCellDirective
-        new_roles = get_glue_roles()
-        for name, directive in new_directives.items():
+        app = get_nb_roles_directives()
+        for name, directive in app.directives.items():
             _directives[name] = directive
-        for name, role in new_roles.items():
+        for name, role in app.roles.items():
             _roles[name] = role
         try:
             return self._parse(inputstring, document)
         finally:
-            for name in new_directives:
+            for name in app.directives:
                 _directives.pop(name, None)
-            for name in new_roles:
+            for name in app.roles:
                 _roles.pop(name, None)
 
     def _parse(self, inputstring: str, document: nodes.document) -> None:
@@ -142,17 +156,9 @@ class Parser(MystParser):
                     "Updated configuration with notebook metadata", subtype="config"
                 )
 
-        # potentially execute notebook and/or populate outputs from cache
-        notebook, exec_data = execute_notebook(
-            notebook, document_source, nb_config, logger
-        )
-        if exec_data:
-            document["nb_exec_data"] = exec_data
-
         # Setup the markdown parser
         mdit_parser = create_md_parser(nb_reader.md_config, DocutilsNbRenderer)
         mdit_parser.options["document"] = document
-        mdit_parser.options["notebook"] = notebook
         mdit_parser.options["nb_config"] = nb_config
         mdit_renderer: DocutilsNbRenderer = mdit_parser.renderer  # type: ignore
         mdit_env: dict[str, Any] = {}
@@ -169,16 +175,20 @@ class Parser(MystParser):
         # we currently do this early, so that the nb_renderer has access to things
         mdit_renderer.setup_render(mdit_parser.options, mdit_env)
 
-        # pre-process notebook and store resources for render
-        resources = preprocess_notebook(
-            notebook, logger, mdit_renderer.get_cell_render_config
-        )
-        mdit_renderer.md_options["nb_resources"] = resources
-
-        # parse to tokens
+        # parse notebook structure to markdown-it tokens
+        # note, this does not assume that the notebook has been executed yet
         mdit_tokens = notebook_to_tokens(notebook, mdit_parser, mdit_env, logger)
-        # convert to docutils AST, which is added to the document
-        mdit_renderer.render(mdit_tokens, mdit_parser.options, mdit_env)
+
+        # open the notebook execution client,
+        # this may execute the notebook immediately or during the page render
+        with create_client(notebook, document_source, nb_config, logger) as nb_client:
+            mdit_parser.options["nb_client"] = nb_client
+            # convert to docutils AST, which is added to the document
+            mdit_renderer.render(mdit_tokens, mdit_parser.options, mdit_env)
+
+        # save final execution data
+        if nb_client.exec_metadata:
+            document["nb_exec_data"] = nb_client.exec_metadata
 
         if nb_config.output_folder:
             # write final (updated) notebook to output folder (utf8 is standard encoding)
@@ -217,65 +227,20 @@ class Parser(MystParser):
         document.attributes.pop("nb_renderer")
 
 
-class DocutilsNbRenderer(DocutilsRenderer):
+class DocutilsNbRenderer(DocutilsRenderer, MditRenderMixin):
     """A docutils-only renderer for Jupyter Notebooks."""
 
-    @property
-    def nb_config(self) -> NbParserConfig:
-        """Get the notebook element renderer."""
-        return self.md_options["nb_config"]
-
-    @property
-    def nb_renderer(self) -> NbElementRenderer:
-        """Get the notebook element renderer."""
-        return self.document["nb_renderer"]
-
-    def get_cell_render_config(
-        self,
-        cell_metadata: dict[str, Any],
-        key: str,
-        nb_key: str | None = None,
-        has_nb_key: bool = True,
-    ) -> Any:
-        """Get a cell level render configuration value.
-
-        :param has_nb_key: Whether to also look in the notebook level configuration
-        :param nb_key: The notebook level configuration key to use if the cell
-            level key is not found. if None, use the ``key`` argument
-
-        :raises: IndexError if the cell index is out of range
-        :raises: KeyError if the key is not found
-        """
-        # TODO allow output level configuration?
-        use_nb_level = True
-        cell_metadata_key = self.nb_config.cell_render_key
-        if cell_metadata_key in cell_metadata:
-            if isinstance(cell_metadata[cell_metadata_key], dict):
-                if key in cell_metadata[cell_metadata_key]:
-                    use_nb_level = False
-            else:
-                # TODO log warning
-                pass
-        if use_nb_level:
-            if not has_nb_key:
-                raise KeyError(key)
-            return self.nb_config[nb_key if nb_key is not None else key]
-        # TODO validate?
-        return cell_metadata[cell_metadata_key][key]
-
-    def render_nb_metadata(self, token: SyntaxTreeNode) -> None:
-        """Render the notebook metadata."""
-        metadata = dict(token.meta)
-        special_keys = ("kernelspec", "language_info", "source_map")
+    def render_nb_initialise(self, token: SyntaxTreeNode) -> None:
+        metadata = self.nb_client.nb_metadata
+        special_keys = ["kernelspec", "language_info", "source_map"]
         for key in special_keys:
             # save these special keys on the document, rather than as docinfo
             if key in metadata:
                 self.document[f"nb_{key}"] = metadata.get(key)
 
-        metadata = self.nb_renderer.render_nb_metadata(dict(token.meta))
-
         if self.nb_config.metadata_to_fm:
             # forward the remaining metadata to the front_matter renderer
+            special_keys.append("widgets")
             top_matter = {k: v for k, v in metadata.items() if k not in special_keys}
             self.render_front_matter(
                 Token(  # type: ignore
@@ -287,103 +252,13 @@ class DocutilsNbRenderer(DocutilsRenderer):
                 ),
             )
 
-    def render_nb_cell_markdown(self, token: SyntaxTreeNode) -> None:
-        """Render a notebook markdown cell."""
-        # TODO this is currently just a "pass-through", but we could utilise the metadata
-        # it would be nice to "wrap" this in a container that included the metadata,
-        # but unfortunately this would break the heading structure of docutils/sphinx.
-        # perhaps we add an "invisible" (non-rendered) marker node to the document tree,
-        self.render_children(token)
-
-    def render_nb_cell_raw(self, token: SyntaxTreeNode) -> None:
-        """Render a notebook raw cell."""
-        line = token_line(token, 0)
-        _nodes = self.nb_renderer.render_raw_cell(
-            token.content, token.meta["metadata"], token.meta["index"], line
-        )
-        self.add_line_and_source_path_r(_nodes, token)
-        self.current_node.extend(_nodes)
-
-    def render_nb_cell_code(self, token: SyntaxTreeNode) -> None:
-        """Render a notebook code cell."""
-        cell_index = token.meta["index"]
-        tags = token.meta["metadata"].get("tags", [])
-
-        # TODO do we need this -/_ duplication of tag names, or can we deprecate one?
-        remove_input = (
-            self.get_cell_render_config(token.meta["metadata"], "remove_code_source")
-            or ("remove_input" in tags)
-            or ("remove-input" in tags)
-        )
-        remove_output = (
-            self.get_cell_render_config(token.meta["metadata"], "remove_code_outputs")
-            or ("remove_output" in tags)
-            or ("remove-output" in tags)
-        )
-
-        # if we are remove both the input and output, we can skip the cell
-        if remove_input and remove_output:
-            return
-
-        # create a container for all the input/output
-        classes = ["cell"]
-        for tag in tags:
-            classes.append(f"tag_{tag.replace(' ', '_')}")
-        cell_container = nodes.container(
-            nb_element="cell_code",
-            cell_index=cell_index,
-            # TODO some way to use this to allow repr of count in outputs like HTML?
-            exec_count=token.meta["execution_count"],
-            cell_metadata=token.meta["metadata"],
-            classes=classes,
-        )
-        self.add_line_and_source_path(cell_container, token)
-        with self.current_node_context(cell_container, append=True):
-
-            # render the code source code
-            if not remove_input:
-                cell_input = nodes.container(
-                    nb_element="cell_code_source", classes=["cell_input"]
-                )
-                self.add_line_and_source_path(cell_input, token)
-                with self.current_node_context(cell_input, append=True):
-                    self.render_nb_cell_code_source(token)
-
-            # render the execution output, if any
-            has_outputs = self.md_options["notebook"]["cells"][cell_index].get(
-                "outputs", []
-            )
-            if (not remove_output) and has_outputs:
-                cell_output = nodes.container(
-                    nb_element="cell_code_output", classes=["cell_output"]
-                )
-                self.add_line_and_source_path(cell_output, token)
-                with self.current_node_context(cell_output, append=True):
-                    self.render_nb_cell_code_outputs(token)
-
-    def render_nb_cell_code_source(self, token: SyntaxTreeNode) -> None:
-        """Render a notebook code cell's source."""
-        lexer = token.meta.get("lexer", None)
-        node = self.create_highlighted_code_block(
-            token.content,
-            lexer,
-            number_lines=self.get_cell_render_config(
-                token.meta["metadata"], "number_source_lines"
-            ),
-            source=self.document["source"],
-            line=token_line(token),
-        )
-        self.add_line_and_source_path(node, token)
-        self.current_node.append(node)
-
-    def render_nb_cell_code_outputs(self, token: SyntaxTreeNode) -> None:
+    def _render_nb_cell_code_outputs(
+        self, token: SyntaxTreeNode, outputs: list[NotebookNode]
+    ) -> None:
         """Render a notebook code cell's outputs."""
         cell_index = token.meta["index"]
         metadata = token.meta["metadata"]
         line = token_line(token)
-        outputs: list[NotebookNode] = self.md_options["notebook"]["cells"][
-            cell_index
-        ].get("outputs", [])
         # render the outputs
         mime_priority = get_mime_priority(
             self.nb_config.builder_name, self.nb_config.mime_priority_overrides
@@ -417,17 +292,6 @@ class DocutilsNbRenderer(DocutilsRenderer):
                 # as opposed to output all mime types, and select in a post-transform
                 # (the mime_priority must then be set for the output format)
 
-                # TODO how to output MyST Markdown?
-                # currently text/markdown is set to be rendered as CommonMark only,
-                # with headings dissallowed,
-                # to avoid "side effects" if the mime is discarded but contained
-                # targets, etc, and because we can't parse headings within containers.
-                # perhaps we could have a config option to allow this?
-                # - for non-commonmark, the text/markdown would always be considered
-                #   the top priority, and all other mime types would be ignored.
-                # - for headings, we would also need to parsing the markdown
-                #   at the "top-level", i.e. not nested in container(s)
-
                 try:
                     mime_type = next(x for x in mime_priority if x in output["data"])
                 except StopIteration:
@@ -439,11 +303,12 @@ class DocutilsNbRenderer(DocutilsRenderer):
                         subtype="mime_type",
                     )
                 else:
-                    figure_options = None
-                    with suppress(KeyError):
-                        figure_options = self.get_cell_render_config(
-                            metadata, "figure", has_nb_key=False
+                    figure_options = (
+                        self.get_cell_level_config(
+                            "render_figure_options", metadata, line=line
                         )
+                        or None
+                    )
 
                     with create_figure_context(self, figure_options, line):
                         _nodes = self.nb_renderer.render_mime_type(

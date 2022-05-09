@@ -38,12 +38,16 @@ dependencies = [
     "importlib_metadata",
     "ipython",
     "jupyter-cache~=0.5.0",
+    "nbclient",  # nbclient version pinned by jupyter-client
     "myst-parser~=0.17.2",
     "nbformat~=5.0",
     "pyyaml",
     "sphinx>=3.5,<5",
     "sphinx-togglebutton~=0.3.0",
     "typing-extensions",
+    # ipykernel is not a requirement of the library,
+    # but is a common requirement for users (registers the python3 kernel)
+    "ipykernel",
 ]
 
 [project.urls]
@@ -79,7 +83,7 @@ rtd = [
     "plotly",
     "sphinx-book-theme~=0.3.0",
     "sphinx-copybutton",
-    "sphinx-panels~=0.4.1",
+    "sphinx-design~=0.1.0",
     "sphinxcontrib-bibtex",
     "sympy",
 ]
@@ -104,6 +108,8 @@ testing = [
 ]
 
 [project.scripts]
+mystnb-quickstart = "myst_nb.cli:quickstart"
+mystnb-to-jupyter = "myst_nb.cli:md_to_nb"
 mystnb-docutils-html = "myst_nb.docutils_:cli_html"
 mystnb-docutils-html5 = "myst_nb.docutils_:cli_html5"
 mystnb-docutils-latex = "myst_nb.docutils_:cli_latex"
