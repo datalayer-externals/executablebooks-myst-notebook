@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from html import escape
 import json
 from pathlib import Path
 import re
@@ -21,6 +22,7 @@ from sphinx.environment import BuildEnvironment
 from sphinx.environment.collectors import EnvironmentCollector
 from sphinx.transforms.post_transforms import SphinxPostTransform
 from sphinx.util import logging as sphinx_logging
+from sphinx.util.docutils import SphinxTranslator
 
 from myst_nb._compat import findall
 from myst_nb.core.config import NbParserConfig
@@ -472,3 +474,94 @@ class BytesEncoder(json.JSONEncoder):
         if isinstance(obj, bytes):
             return obj.decode("ascii")
         return json.JSONEncoder.default(self, obj)
+
+
+class HideCodeCellNode(nodes.Element):
+    """Node for hiding cell input."""
+
+    @classmethod
+    def add_to_app(cls, app: Sphinx):
+        app.add_node(cls, html=(visit_HideCellInput, depart_HideCellInput))
+
+
+def visit_HideCellInput(self: SphinxTranslator, node: HideCodeCellNode):
+    classes = " ".join(node["classes"])
+    self.body.append(f'<details class="hide {classes}">\n')
+    self.body.append('<summary aria-label="Toggle hidden content">\n')
+    self.body.append(f'<span class="collapsed">{escape(node["prompt_show"])}</span>\n')
+    self.body.append(f'<span class="expanded">{escape(node["prompt_hide"])}</span>\n')
+    self.body.append("</summary>\n")
+
+
+def depart_HideCellInput(self: SphinxTranslator, node: HideCodeCellNode):
+    self.body.append("</details>\n")
+
+
+class HideInputCells(SphinxPostTransform):
+    """Hide input cells in the HTML output."""
+
+    default_priority = 199
+    formats = ("html",)
+
+    def run(self, **kwargs):
+
+        for node in findall(self.document)(nodes.container):
+
+            if (
+                node.get("nb_element") == "cell_code"
+                and node.get("hide_mode")
+                and node.children
+            ):
+                hide_mode = node.get("hide_mode")
+                has_input = node.children[0].get("nb_element") == "cell_code_source"
+                has_output = node.children[-1].get("nb_element") == "cell_code_output"
+
+                if has_input and hide_mode == "all":
+                    # wrap everything and place a summary above the input
+                    wrap_node = HideCodeCellNode(
+                        prompt_show=node["prompt_show"].replace("{type}", "content"),
+                        prompt_hide=node["prompt_hide"].replace("{type}", "content"),
+                    )
+                    wrap_node["classes"].append("above-input")
+                    wrap_node.extend(node.children)
+                    node.children = [wrap_node]
+
+                if has_input and has_output and hide_mode in ("output", "input+output"):
+                    node.children[0]["classes"].append("above-output-prompt")
+
+                if has_input and hide_mode in ("input", "input+output"):
+                    # wrap just the input and place a summary above the input
+                    wrap_node = HideCodeCellNode(
+                        prompt_show=node["prompt_show"].replace("{type}", "source"),
+                        prompt_hide=node["prompt_hide"].replace("{type}", "source"),
+                    )
+                    wrap_node["classes"].append("above-input")
+                    code = node.children[0]
+                    wrap_node.append(code)
+                    node.replace(code, wrap_node)
+
+                if has_input and has_output and hide_mode in ("output", "input+output"):
+                    # wrap just the output and place a summary below the input
+                    wrap_node = HideCodeCellNode(
+                        prompt_show=node["prompt_show"].replace("{type}", "output"),
+                        prompt_hide=node["prompt_hide"].replace("{type}", "output"),
+                    )
+                    wrap_node["classes"].append("below-input")
+                    output = node.children[-1]
+                    wrap_node.append(output)
+                    node.replace(output, wrap_node)
+
+                if (
+                    (not has_input)
+                    and has_output
+                    and hide_mode in ("all", "input+output", "output")
+                ):
+                    # wrap just the output and place a summary above the output
+                    wrap_node = HideCodeCellNode(
+                        prompt_show=node["prompt_show"].replace("{type}", "outputs"),
+                        prompt_hide=node["prompt_hide"].replace("{type}", "outputs"),
+                    )
+                    wrap_node["classes"].append("above-output")
+                    output = node.children[-1]
+                    wrap_node.append(output)
+                    node.replace(output, wrap_node)
