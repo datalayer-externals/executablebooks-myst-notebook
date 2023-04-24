@@ -37,7 +37,7 @@ requires-python = ">=3.7"
 dependencies = [
     "importlib_metadata",
     "ipython",
-    "jupyter-cache~=0.5.0",
+    "jupyter-cache>=0.5,<0.7",
     "nbclient",  # nbclient version pinned by jupyter-client
     "myst-parser~=0.18.0",
     "nbformat~=5.0",
@@ -72,7 +72,7 @@ rtd = [
     "alabaster",
     "altair",
     "bokeh",
-    "coconut~=1.4.3",
+    "coconut>=1.4.3,<2.3.0",
     "ipykernel~=5.5",
     "ipywidgets",
     "jupytext~=1.11.2",
@@ -87,7 +87,7 @@ rtd = [
     "sympy",
 ]
 testing = [
-    "coverage~=6.4",
+    "coverage>=6.4,<8.0",
     "beautifulsoup4",
     "ipykernel~=5.5",
     # for issue with 8.1.0 see https://github.com/ipython/ipython/issues/13554
@@ -101,7 +101,7 @@ testing = [
     "numpy",
     "pandas",
     "pytest~=7.1",
-    "pytest-cov~=3.0",
+    "pytest-cov>=3,<5",
     "pytest-regressions",
     "pytest-param-files~=0.3.3",
     "sympy>=1.10.1",
