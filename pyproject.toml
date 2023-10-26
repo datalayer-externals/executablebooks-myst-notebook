@@ -7,10 +7,11 @@ name = "myst-nb"
 dynamic = ["version"]
 description = "A Jupyter Notebook Sphinx reader built on top of the MyST markdown parser."
 authors = [{name = "ExecutableBookProject", email = "chrisj_sewell@hotmail.com"}]
+maintainers = [{name = "Angus Hollands", email = "goosey15@gmail.com"}]
 readme = "README.md"
 license = {file = "LICENSE"}
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Framework :: Sphinx :: Extension",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
@@ -19,6 +20,8 @@ classifiers = [
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
     "Topic :: Software Development :: Libraries :: Python Modules",
@@ -38,10 +41,10 @@ dependencies = [
     "ipython",
     "jupyter-cache>=0.5,<0.7",
     "nbclient",  # nbclient version pinned by jupyter-client
-    "myst-parser>=0.18.0",
+    "myst-parser>=1.0.0",
     "nbformat~=5.0",
     "pyyaml",
-    "sphinx>=4",
+    "sphinx>=5",
     "typing-extensions",
     # ipykernel is not a requirement of the library,
     # but is a common requirement for users (registers the python3 kernel)
